@@ -51,15 +51,15 @@
 
 <div id="startScreen" class="overlay">
   <h1>SQUIRREL PATROL</h1>
-  <div class="sub">One minute. Three feeders. One garden hose.</div>
+  <div class="sub">Three levels. Three feeders. One garden hose.</div>
   <div class="rules">
     <b>💧 Hold &amp; drag to aim the hose.</b> The stream sweeps slowly — you can't be everywhere at once.<br>
     <b>🐿️ Blast squirrels</b> off the poles and across the yard. Soak them long enough to send them flying.<br>
     <span class="bird"><b>🐦 Mind the birds!</b></span> Cardinals, chickadees, bluebirds &amp; goldfinches earn points while they feed — but a faceful of water scares them off and costs you.<br>
     <b>🛡️ Baffles</b> slow squirrels down until they chew through them.<br>
     <b>🐀 Gray squirrels are fast</b> — they'll flank a feeder while you're busy elsewhere.<br>
-    <b>👹 Final 20 seconds — the Surge:</b> giant squirrels need a long, steady soak.<br><br>
-    Survive the minute with seed in any feeder and you win.
+    <b>👹 The Surge:</b> in the final level, giant squirrels need a long, steady soak.<br><br>
+    <b>Clear all three levels</b> — Backyard Skirmish, Gray Invasion, then the Surge — with seed left in a feeder to win.
   </div>
   <button id="startBtn">Grab the Hose</button>
 </div>
@@ -72,15 +72,50 @@
   <button id="retryBtn">Patrol Again</button>
 </div>
 
+<div id="levelScreen" class="overlay hidden">
+  <h1 id="levelTitle" class="win">LEVEL CLEARED!</h1>
+  <div class="sub" id="levelSub"></div>
+  <div class="bigscore" id="levelScore">0</div>
+  <div class="best">Feeders refilled for the next wave.</div>
+  <button id="nextBtn">Next Level</button>
+</div>
+
 <script>
 (() => {
 "use strict";
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 let W = 0, H = 0, GROUND = 0;
-const GAME_LEN = 60;
-const SURGE_AT = 40;
-const GIANT_TIMES = [41, 44.5, 48, 51.5, 55, 58];
+
+// ---------- Levels ----------
+// Difficulty ramps across three discrete levels. Each lasts `duration` seconds; the
+// spawn interval eases from spawnStart to spawnEnd as the level progresses (smaller =
+// more squirrels). `fast` is the chance a squirrel is a quick gray flanker. Only the
+// final level fields giant squirrels (giantTimes, relative to level start) + the surge.
+const LEVELS = [
+  {
+    name: 'Backyard Skirmish', shortName: 'Level 1', short: 'LEVEL 1',
+    sub: 'Just the regular squirrels at a steady trickle. Keep the feeders full.',
+    clearTitle: 'LEVEL 1 CLEARED!',
+    duration: 35, spawnStart: 2.6, spawnEnd: 2.0,
+    fast: 0, giants: false, surge: false
+  },
+  {
+    name: 'Gray Invasion', shortName: 'Level 2', short: 'LEVEL 2',
+    sub: "More of them — plus fast grays that flank while you're busy elsewhere.",
+    clearTitle: 'LEVEL 2 CLEARED!',
+    duration: 40, spawnStart: 2.0, spawnEnd: 1.35,
+    fast: 0.28, giants: false, surge: false
+  },
+  {
+    name: 'The Surge', shortName: 'Level 3', short: 'LEVEL 3',
+    sub: 'Giant squirrels and a full-on surge. Soak the big ones long and steady.',
+    clearTitle: '',
+    duration: 45, spawnStart: 1.4, spawnEnd: 0.85,
+    fast: 0.3, giants: true, surge: true,
+    giantTimes: [5, 11, 18, 25, 33, 41]
+  }
+];
 
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -159,9 +194,9 @@ document.getElementById('muteBtn').addEventListener('click', e => {
 });
 
 // ---------- Game state ----------
-const STATE = { MENU:0, PLAYING:1, OVER:2 };
+const STATE = { MENU:0, PLAYING:1, OVER:2, LEVELCLEAR:3 };
 let state = STATE.MENU;
-let score = 0, best = 0, launched = 0, elapsed = 0;
+let score = 0, best = 0, launched = 0, elapsed = 0, level = 0;
 let squirrels = [], birds = [], floaties = [], particles = [], droplets = [], clouds = [];
 let spawnTimer = 0, birdTimer = 0, giantQueue = [], surgeAnnounced = false, surgeFlash = 0;
 const feeders = [];
@@ -211,9 +246,10 @@ function spawnSquirrel(giant) {
   const side = Math.random() < 0.5 ? -1 : 1;
   const target = feeders.filter(f => f.seed > 0);
   const f = (target.length ? target : feeders)[Math.floor(Math.random() * (target.length ? target.length : feeders.length))];
-  const sneaky = !giant && elapsed > 12 && Math.random() < 0.25;
-  let speedBase = giant ? 60 : 70 + Math.min(120, elapsed * 2.4);
-  if (sneaky) speedBase *= 1.6;
+  const lv = LEVELS[level];
+  const sneaky = !giant && lv.fast > 0 && elapsed > 5 && Math.random() < lv.fast;
+  let speedBase = giant ? 60 : 66 + level * 16 + Math.min(80, elapsed * 2.0);
+  if (sneaky) speedBase *= 1.55;
   squirrels.push({
     x: side < 0 ? -50 : W + 50,
     y: GROUND - (giant ? 26 : 14),
@@ -266,10 +302,10 @@ function addPoof(x, y, color, n) {
 }
 
 function spawnInterval() {
-  const t = elapsed;
-  if (t < 15)       return 2.2 - t * 0.055;            // 2.2 -> 1.4
-  else if (t < 40)  return 1.4 - (t - 15) * 0.03;      // 1.4 -> 0.65
-  else              return Math.max(0.25, 0.55 - (t - 40) * 0.015); // 0.55 -> 0.25
+  // ease from the level's opening interval to its faster closing interval
+  const lv = LEVELS[level];
+  const frac = Math.min(1, elapsed / lv.duration);
+  return lv.spawnStart + (lv.spawnEnd - lv.spawnStart) * frac;
 }
 
 // ---------- Hose mechanics ----------
@@ -317,6 +353,7 @@ function emitDroplets(dt) {
 // ---------- Update ----------
 function update(dt) {
   elapsed += dt;
+  const lv = LEVELS[level];
   if (surgeFlash > 0) surgeFlash -= dt;
 
   // hose nozzle eases toward pointer target, capped speed
@@ -330,8 +367,8 @@ function update(dt) {
 
   if (hose.spraying) { emitDroplets(dt); setSpray(true); } else setSpray(false);
 
-  // surge announce
-  if (!surgeAnnounced && elapsed >= SURGE_AT) {
+  // surge announce (final level only — kicks in the moment the level starts)
+  if (lv.surge && !surgeAnnounced) {
     surgeAnnounced = true; surgeFlash = 1.6;
     addFloaty(W/2, H*0.3, '🐿️ SQUIRREL SURGE! 🐿️', '#e87a6a');
     sfx.surge();
@@ -341,12 +378,12 @@ function update(dt) {
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
     spawnSquirrel(false);
-    if (elapsed >= SURGE_AT && Math.random() < 0.5) spawnSquirrel(false);
+    if (lv.surge && Math.random() < 0.5) spawnSquirrel(false);
     spawnTimer = spawnInterval() * (0.78 + Math.random()*0.44);
   }
 
   birdTimer -= dt;
-  if (birdTimer <= 0) { spawnBird(); birdTimer = (elapsed >= SURGE_AT ? 4 : 2.4) + Math.random()*3; }
+  if (birdTimer <= 0) { spawnBird(); birdTimer = (lv.surge ? 4 : 2.4) + Math.random()*3; }
 
   // squirrels
   for (let i = squirrels.length - 1; i >= 0; i--) {
@@ -463,8 +500,11 @@ function update(dt) {
   for (let i = droplets.length-1; i >= 0; i--) { const d = droplets[i]; d.x += d.vx*dt; d.y += d.vy*dt; d.vy += 700*dt; d.life -= dt; if (d.life <= 0 || d.y > H) droplets.splice(i,1); }
   clouds.forEach(c => { c.x += c.v*dt; if (c.x > W + 120) c.x = -120; });
 
-  if (elapsed >= GAME_LEN) endGame(true);
-  else if (feeders.every(f => f.seed <= 0)) endGame(false);
+  if (feeders.every(f => f.seed <= 0)) endGame(false);
+  else if (elapsed >= lv.duration) {
+    if (level >= LEVELS.length - 1) endGame(true);   // cleared the final level — win
+    else levelClear();                               // advance to the next level
+  }
 }
 
 // ---------- Input: hold to spray, drag to aim ----------
@@ -486,7 +526,7 @@ canvas.addEventListener('pointercancel', () => { hose.spraying = false; });
 
 // ---------- Drawing ----------
 function drawScene() {
-  const surge = elapsed >= SURGE_AT && state === STATE.PLAYING;
+  const surge = LEVELS[level].surge && state === STATE.PLAYING;
   const sky = ctx.createLinearGradient(0, 0, 0, GROUND);
   sky.addColorStop(0, surge ? '#9a8ab0' : '#7ba8c9');
   sky.addColorStop(0.55, surge ? '#d9b89a' : '#cfd9b8');
@@ -656,13 +696,16 @@ function drawHose() {
 }
 
 function drawHUD() {
-  const remain = Math.max(0, GAME_LEN - elapsed);
-  const inSurge = elapsed >= SURGE_AT;
+  const lv = LEVELS[level];
+  const remain = Math.max(0, lv.duration - elapsed);
+  const inSurge = lv.surge;
   ctx.textAlign = 'center';
   ctx.font = 'bold 30px Georgia';
   ctx.fillStyle = inSurge ? (Math.floor(elapsed*3)%2===0 ? '#c8362b' : '#8a2a21') : 'rgba(30,22,14,0.85)';
   ctx.fillText('⏱ ' + Math.ceil(remain) + 's', W/2, 38);
-  if (inSurge) { ctx.font = 'bold 14px Georgia'; ctx.fillStyle = '#c8362b'; ctx.fillText('SQUIRREL SURGE', W/2, 58); }
+  ctx.font = 'bold 14px Georgia';
+  if (inSurge) { ctx.fillStyle = '#c8362b'; ctx.fillText('SQUIRREL SURGE', W/2, 58); }
+  else { ctx.fillStyle = 'rgba(30,22,14,0.7)'; ctx.fillText(lv.short, W/2, 58); }
 
   ctx.textAlign = 'left';
   ctx.font = 'bold 22px Georgia'; ctx.fillStyle = 'rgba(30,22,14,0.85)';
@@ -698,33 +741,56 @@ function loop(t) {
 }
 
 function startGame() {
-  score = 15; launched = 0; elapsed = 0;
+  score = 15; launched = 0; level = 0;
+  startLevel();
+}
+
+// Reset the field and feeders for the current `level`, then start play. Score and
+// washed-out count carry across levels; feeders + baffles are refilled each level.
+function startLevel() {
+  const lv = LEVELS[level];
+  elapsed = 0;
   squirrels = []; birds = []; floaties = []; particles = []; droplets = [];
   feeders.forEach(f => { f.seed = f.max; f.shake = 0; f.baffle = f.baffleMax; });
   hose.x = W/2; hose.y = GROUND - 40; hose.tx = hose.x; hose.ty = hose.y; hose.spraying = false;
   spawnTimer = 1.0; birdTimer = 1;
-  giantQueue = GIANT_TIMES.slice();
+  giantQueue = lv.giants ? lv.giantTimes.slice() : [];
   surgeAnnounced = false; surgeFlash = 0;
   state = STATE.PLAYING;
   document.getElementById('startScreen').classList.add('hidden');
   document.getElementById('gameOverScreen').classList.add('hidden');
+  document.getElementById('levelScreen').classList.add('hidden');
+  addFloaty(W/2, H*0.26, lv.short + ' — ' + lv.name, '#ffd97a');
   ac();
+}
+
+function levelClear() {
+  state = STATE.LEVELCLEAR; setSpray(false); hose.spraying = false;
+  best = Math.max(best, Math.floor(score));
+  sfx.win();
+  const cur = LEVELS[level], next = LEVELS[level + 1];
+  document.getElementById('levelTitle').textContent = cur.clearTitle || 'LEVEL CLEARED!';
+  document.getElementById('levelSub').textContent = 'Up next — ' + next.name + ': ' + next.sub;
+  document.getElementById('levelScore').textContent = Math.floor(score);
+  document.getElementById('nextBtn').textContent = 'Start ' + next.shortName;
+  document.getElementById('levelScreen').classList.remove('hidden');
 }
 
 function endGame(won) {
   state = STATE.OVER; setSpray(false); hose.spraying = false;
   best = Math.max(best, Math.floor(score));
   const title = document.getElementById('endTitle'), sub = document.getElementById('endSub');
-  if (won) { title.textContent = 'FEEDERS DEFENDED!'; title.classList.add('win'); sub.textContent = 'The birds of coastal Virginia thank you. 🐦'; sfx.win(); }
-  else { title.textContent = 'FEEDERS EMPTY!'; title.classList.remove('win'); sub.textContent = 'The squirrels won this round…'; sfx.over(); }
+  if (won) { title.textContent = 'GARDEN DEFENDED!'; title.classList.add('win'); sub.textContent = 'All three levels held. The birds of coastal Virginia thank you. 🐦'; sfx.win(); }
+  else { title.textContent = 'FEEDERS EMPTY!'; title.classList.remove('win'); sub.textContent = 'The squirrels overran ' + LEVELS[level].short + '…'; sfx.over(); }
   document.getElementById('finalScore').textContent = Math.floor(score);
   document.getElementById('bestLine').textContent =
-    'Best: ' + best + ' · Squirrels washed out: ' + launched + ' · Survived ' + Math.min(GAME_LEN, Math.floor(elapsed)) + 's';
+    'Best: ' + best + ' · Squirrels washed out: ' + launched + (won ? '' : ' · Reached ' + LEVELS[level].short);
   document.getElementById('gameOverScreen').classList.remove('hidden');
 }
 
 document.getElementById('startBtn').addEventListener('click', startGame);
 document.getElementById('retryBtn').addEventListener('click', startGame);
+document.getElementById('nextBtn').addEventListener('click', () => { level++; startLevel(); });
 
 resize(); initClouds(); requestAnimationFrame(loop);
 })();
