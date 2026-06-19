@@ -54,6 +54,7 @@
   <div class="sub">Three levels. Three feeders. One garden hose.</div>
   <div class="rules">
     <b>💧 Hold &amp; drag to aim the hose.</b> The stream sweeps slowly — you can't be everywhere at once.<br>
+    <b>🌰 Running low? Tap &amp; hold a feeder</b> to pour the seed back in — but that's a hand off the hose.<br>
     <b>🐿️ Blast squirrels</b> off the poles and across the yard. Soak them long enough to send them flying.<br>
     <span class="bird"><b>🐦 Mind the birds!</b></span> Cardinals, chickadees, bluebirds &amp; goldfinches earn points while they feed — but a faceful of water scares them off and costs you.<br>
     <b>🛡️ Baffles</b> slow squirrels down until they chew through them.<br>
@@ -200,6 +201,8 @@ let score = 0, best = 0, launched = 0, elapsed = 0, level = 0;
 let squirrels = [], birds = [], floaties = [], particles = [], droplets = [], clouds = [];
 let spawnTimer = 0, birdTimer = 0, giantQueue = [], surgeAnnounced = false, surgeFlash = 0;
 const feeders = [];
+let refilling = null, refillSoundT = 0;   // feeder currently being topped up by a held finger
+const REFILL_RATE = 55;                    // seed/sec poured in while holding (empty→full ≈ 1.8s)
 
 // Hose: nozzle position eases toward target (the pointer). Stream emits from a
 // fixed base at bottom-center toward the nozzle.
@@ -367,6 +370,17 @@ function update(dt) {
 
   if (hose.spraying) { emitDroplets(dt); setSpray(true); } else setSpray(false);
 
+  // hold a feeder to pour seed back in — seed streams in and the box glows
+  if (refilling) {
+    const f = refilling;
+    f.seed = Math.min(f.max, f.seed + REFILL_RATE * dt);
+    const boxTop = GROUND - feederHeight() - 26;
+    if (Math.random() < dt * 45) particles.push({ x: f.x + (Math.random()-0.5)*34, y: boxTop, vx:(Math.random()-0.5)*22, vy: 50+Math.random()*70, life:0.45, color:'#e2b24a', r:1.5+Math.random()*1.5 });
+    refillSoundT -= dt;
+    if (refillSoundT <= 0) { sfx.refill(); refillSoundT = 0.16; }
+    if (f.seed >= f.max) { addFloaty(f.x, boxTop - 18, 'refilled!', '#9fd8a3'); refilling = null; }
+  }
+
   // surge announce (final level only — kicks in the moment the level starts)
   if (lv.surge && !surgeAnnounced) {
     surgeAnnounced = true; surgeFlash = 1.6;
@@ -507,22 +521,40 @@ function update(dt) {
   }
 }
 
-// ---------- Input: hold to spray, drag to aim ----------
-function setTarget(e) {
+// ---------- Input: hold to spray & drag to aim, or hold a feeder to refill it ----------
+function eventPoint(e) {
   const rect = canvas.getBoundingClientRect();
-  hose.tx = e.clientX - rect.left;
-  hose.ty = e.clientY - rect.top;
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+// A generous touch box around a feeder's head (roof + seed box) so a thumb can land it.
+// It sits up at the box, so taps on the lawn or lower poles still drive the hose.
+function feederAtPoint(px, py) {
+  const top = GROUND - feederHeight() - 50, bot = GROUND - feederHeight() + 32;
+  for (const f of feeders) {
+    if (px > f.x - 40 && px < f.x + 40 && py > top && py < bot) return f;
+  }
+  return null;
 }
 canvas.addEventListener('pointerdown', e => {
   if (state !== STATE.PLAYING) return;
-  hose.spraying = true; setTarget(e); ac();
+  ac();
+  const p = eventPoint(e);
+  const f = feederAtPoint(p.x, p.y);
+  // A feeder with room and nobody perched on it refills on hold; otherwise the tap
+  // works the hose, so you can still blast a squirrel sitting on the feeder.
+  const busy = f && squirrels.some(s => s.feeder === f && (s.state === 'eat' || s.state === 'nibble'));
+  if (f && f.seed < f.max && !busy) {
+    refilling = f; hose.spraying = false;
+  } else {
+    refilling = null; hose.spraying = true; hose.tx = p.x; hose.ty = p.y;
+  }
 });
 canvas.addEventListener('pointermove', e => {
-  if (state !== STATE.PLAYING) return;
-  setTarget(e);
+  if (state !== STATE.PLAYING || refilling) return;   // while refilling, the nozzle stays put
+  const p = eventPoint(e); hose.tx = p.x; hose.ty = p.y;
 });
-window.addEventListener('pointerup', () => { hose.spraying = false; });
-canvas.addEventListener('pointercancel', () => { hose.spraying = false; });
+window.addEventListener('pointerup', () => { hose.spraying = false; refilling = null; });
+canvas.addEventListener('pointercancel', () => { hose.spraying = false; refilling = null; });
 
 // ---------- Drawing ----------
 function drawScene() {
@@ -599,6 +631,24 @@ function drawFeeder(f) {
   ctx.beginPath(); ctx.moveTo(-bw/2 - 10, topY - bh + 26); ctx.lineTo(0, topY - bh + 4); ctx.lineTo(bw/2 + 10, topY - bh + 26); ctx.closePath(); ctx.fill();
   ctx.fillStyle = '#7a5a3a'; ctx.fillRect(-bw/2 - 8, topY + 22, bw + 16, 5);
   ctx.restore();
+
+  // refill feedback: glow the seed box while filling, else nudge low feeders to hold
+  if (refilling === f) {
+    ctx.save();
+    ctx.globalAlpha = 0.45 + Math.abs(Math.sin(elapsed * 9)) * 0.35;
+    ctx.strokeStyle = '#ffe9a8'; ctx.lineWidth = 4; ctx.shadowColor = '#ffd97a'; ctx.shadowBlur = 16;
+    ctx.strokeRect(f.x - bw/2 - 2, topY - bh + 24, bw + 4, bh + 4);
+    ctx.restore();
+  } else if (state === STATE.PLAYING && f.seed < 35 &&
+             !squirrels.some(s => s.feeder === f && (s.state === 'eat' || s.state === 'nibble'))) {
+    ctx.save();
+    ctx.globalAlpha = 0.35 + Math.abs(Math.sin(elapsed * 4)) * 0.45;
+    ctx.font = 'bold 12px Georgia'; ctx.textAlign = 'center';
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 3; ctx.fillStyle = '#fff7ea';
+    ctx.strokeText('💧 hold to refill', f.x, topY - bh + 2);
+    ctx.fillText('💧 hold to refill', f.x, topY - bh + 2);
+    ctx.restore();
+  }
 
   ctx.font = 'bold 12px Georgia'; ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(40,30,20,0.7)'; ctx.fillText(Math.round(f.seed) + '%', f.x, GROUND + 18);
@@ -753,6 +803,7 @@ function startLevel() {
   squirrels = []; birds = []; floaties = []; particles = []; droplets = [];
   feeders.forEach(f => { f.seed = f.max; f.shake = 0; f.baffle = f.baffleMax; });
   hose.x = W/2; hose.y = GROUND - 40; hose.tx = hose.x; hose.ty = hose.y; hose.spraying = false;
+  refilling = null; refillSoundT = 0;
   spawnTimer = 1.0; birdTimer = 1;
   giantQueue = lv.giants ? lv.giantTimes.slice() : [];
   surgeAnnounced = false; surgeFlash = 0;
